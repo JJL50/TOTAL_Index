@@ -99,7 +99,7 @@ calcIndicators(string tf) =>
     tf_dxSum = tf_diPlus + tf_diMinus
     tf_dxValue = tf_dxSum != 0 ? math.abs(tf_diPlus - tf_diMinus) / tf_dxSum * 100 : 0.0
     tf_adx_temp = ta.rma(tf_dxValue, 14)
-    tf_adx = not na(tf_dxValue) ? tf_adx_temp : na
+    tf_adx = not na(tf_dxValue) and tf_dxValue >= 0 ? tf_adx_temp : na
     
     tf_bbBasis = request.security(syminfo.tickerid, tf, ta.sma(close, 20), lookahead=barmerge.lookahead_off)
     tf_bbDev = request.security(syminfo.tickerid, tf, ta.stdev(close, 20), lookahead=barmerge.lookahead_off)
