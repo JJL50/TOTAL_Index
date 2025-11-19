@@ -1,0 +1,977 @@
+//@version=6
+indicator("📊 Multi-Strategy Trading System v3 (MTF)", overlay=true, max_labels_count=500)
+
+// ═════════════════════════════════════════════════════════════
+// 입력 설정
+// ═════════════════════════════════════════════════════════════
+showBuySignals = input.bool(true, "매수 타점 표시", group="신호 설정")
+showSellSignals = input.bool(true, "매도 타점 표시", group="신호 설정")
+minConditions = input.int(1, "최소 충족 조건 수", minval=1, maxval=7, group="신호 설정", tooltip="조건이 너무 엄격하면 신호가 거의 나타나지 않습니다")
+
+// 타임프레임 표시 설정
+showCTF = input.bool(true, "CTF 신호 표시", group="타임프레임 신호")
+showHTF1 = input.bool(true, "HTF1 신호 표시", group="타임프레임 신호")
+showHTF2 = input.bool(true, "HTF2 신호 표시", group="타임프레임 신호")
+showHTF3 = input.bool(true, "HTF3 신호 표시", group="타임프레임 신호")
+
+// MTF 설정
+useMTF = input.bool(true, "다중 타임프레임 활성화", group="MTF 설정")
+mtfTrendWeight = input.int(1, "MTF 추세 가중치", minval=0, maxval=3, tooltip="0=무시, 1=약함, 2=보통, 3=강함", group="MTF 설정")
+
+// 레이블 스타일 설정
+buyLabelSize = input.string("small", "매수 레이블 크기", options=["tiny", "small", "normal", "large"], group="레이블 스타일")
+sellLabelSize = input.string("small", "매도 레이블 크기", options=["tiny", "small", "normal", "large"], group="레이블 스타일")
+buyLabelColor = input.color(color.new(color.green, 0), "매수 레이블 색상", group="레이블 스타일")
+sellLabelColor = input.color(color.new(color.red, 0), "매도 레이블 색상", group="레이블 스타일")
+
+// 레이블 크기 변환
+getLabelSize(sizeStr) =>
+    sizeStr == "tiny" ? size.tiny : sizeStr == "small" ? size.small : sizeStr == "normal" ? size.normal : size.large
+
+// ═════════════════════════════════════════════════════════════
+// 타임프레임 자동 결정 (1분, 5분, 15분, 1시간, 4시간, 1일, 1주, 1월봉)
+// ═════════════════════════════════════════════════════════════
+// 현재 타임프레임을 분 단위로 변환
+currentTFMinutes = timeframe.in_seconds() / 60
+
+// 타임프레임 배열: 1분, 5분, 15분, 60분(1시간), 240분(4시간), 1440분(1일), 10080분(1주), 43200분(1월)
+var int[] tfArray = array.from(1, 5, 15, 60, 240, 1440, 10080, 43200)
+var string[] tfStringArray = array.from("1", "5", "15", "60", "240", "D", "W", "M")
+
+// 현재 타임프레임 인덱스 찾기
+currentTFIdx = -1
+for i = 0 to array.size(tfArray) - 1
+    if array.get(tfArray, i) == currentTFMinutes
+        currentTFIdx := i
+        break
+
+// CTF, HTF1, HTF2, HTF3 인덱스 결정
+ctfIdx = currentTFIdx
+htf1Idx = currentTFIdx >= 0 and currentTFIdx < array.size(tfArray) - 1 ? currentTFIdx + 1 : -1
+htf2Idx = currentTFIdx >= 0 and currentTFIdx < array.size(tfArray) - 2 ? currentTFIdx + 2 : -1
+htf3Idx = currentTFIdx >= 0 and currentTFIdx < array.size(tfArray) - 3 ? currentTFIdx + 3 : -1
+
+// 타임프레임 문자열 가져오기
+ctfString = ctfIdx >= 0 ? array.get(tfStringArray, ctfIdx) : ""
+htf1String = htf1Idx >= 0 ? array.get(tfStringArray, htf1Idx) : ""
+htf2String = htf2Idx >= 0 ? array.get(tfStringArray, htf2Idx) : ""
+htf3String = htf3Idx >= 0 ? array.get(tfStringArray, htf3Idx) : ""
+
+// 타임프레임 텍스트 변환 함수
+getTFText(string tf) =>
+    tf == "1" ? "1M" : tf == "5" ? "5M" : tf == "15" ? "15M" : tf == "60" ? "1H" : tf == "240" ? "4H" : tf == "D" ? "1D" : tf == "W" ? "1W" : tf == "M" ? "1MO" : ""
+
+ctfText = getTFText(ctfString)
+htf1Text = getTFText(htf1String)
+htf2Text = getTFText(htf2String)
+htf3Text = getTFText(htf3String)
+
+// ═════════════════════════════════════════════════════════════
+// 기술 지표 계산 함수 (타임프레임별)
+// ═════════════════════════════════════════════════════════════
+// IMMUTABLE DATA PATTERN: 각 타임프레임별로 독립적으로 계산
+calcIndicators(string tf) =>
+    // request.security로 해당 타임프레임의 지표 계산
+    tf_ma5 = request.security(syminfo.tickerid, tf, ta.sma(close, 5), lookahead=barmerge.lookahead_off)
+    tf_ma20 = request.security(syminfo.tickerid, tf, ta.sma(close, 20), lookahead=barmerge.lookahead_off)
+    tf_ma60 = request.security(syminfo.tickerid, tf, ta.sma(close, 60), lookahead=barmerge.lookahead_off)
+    tf_ma120 = request.security(syminfo.tickerid, tf, ta.sma(close, 120), lookahead=barmerge.lookahead_off)
+    tf_ma200 = request.security(syminfo.tickerid, tf, ta.sma(close, 200), lookahead=barmerge.lookahead_off)
+    
+    tf_rsi = request.security(syminfo.tickerid, tf, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+    // MACD 각 요소를 별도로 계산
+    tf_macdLine = request.security(syminfo.tickerid, tf, ta.ema(close, 12) - ta.ema(close, 26), lookahead=barmerge.lookahead_off)
+    tf_signalLine = request.security(syminfo.tickerid, tf, ta.ema(ta.ema(close, 12) - ta.ema(close, 26), 9), lookahead=barmerge.lookahead_off)
+    tf_macdHist = tf_macdLine - tf_signalLine
+    tf_kValue = request.security(syminfo.tickerid, tf, ta.stoch(close, high, low, 14), lookahead=barmerge.lookahead_off)
+    tf_dValue = request.security(syminfo.tickerid, tf, ta.sma(ta.stoch(close, high, low, 14), 3), lookahead=barmerge.lookahead_off)
+    // DMI 각 요소를 직접 계산 (request.security 내에서 완전히 독립적으로)
+    tf_trueRange = request.security(syminfo.tickerid, tf, ta.tr, lookahead=barmerge.lookahead_off)
+    tf_highDiff = request.security(syminfo.tickerid, tf, high - high[1], lookahead=barmerge.lookahead_off)
+    tf_lowDiff = request.security(syminfo.tickerid, tf, low[1] - low, lookahead=barmerge.lookahead_off)
+    tf_plusDM_raw = request.security(syminfo.tickerid, tf, (high - high[1]) > (low[1] - low) and (high - high[1]) > 0 ? (high - high[1]) : 0.0, lookahead=barmerge.lookahead_off)
+    tf_minusDM_raw = request.security(syminfo.tickerid, tf, (low[1] - low) > (high - high[1]) and (low[1] - low) > 0 ? (low[1] - low) : 0.0, lookahead=barmerge.lookahead_off)
+    tf_smoothedTR = request.security(syminfo.tickerid, tf, ta.rma(ta.tr, 14), lookahead=barmerge.lookahead_off)
+    tf_smoothedPlusDM = request.security(syminfo.tickerid, tf, ta.rma((high - high[1]) > (low[1] - low) and (high - high[1]) > 0 ? (high - high[1]) : 0.0, 14), lookahead=barmerge.lookahead_off)
+    tf_smoothedMinusDM = request.security(syminfo.tickerid, tf, ta.rma((low[1] - low) > (high - high[1]) and (low[1] - low) > 0 ? (low[1] - low) : 0.0, 14), lookahead=barmerge.lookahead_off)
+    tf_diPlus = tf_smoothedTR != 0 ? (tf_smoothedPlusDM / tf_smoothedTR) * 100 : 0.0
+    tf_diMinus = tf_smoothedTR != 0 ? (tf_smoothedMinusDM / tf_smoothedTR) * 100 : 0.0
+    tf_dxSum = tf_diPlus + tf_diMinus
+    tf_dxValue = tf_dxSum != 0 ? math.abs(tf_diPlus - tf_diMinus) / tf_dxSum * 100 : 0.0
+    tf_adx = ta.rma(tf_dxValue, 14)
+    
+    tf_bbBasis = request.security(syminfo.tickerid, tf, ta.sma(close, 20), lookahead=barmerge.lookahead_off)
+    tf_bbDev = request.security(syminfo.tickerid, tf, ta.stdev(close, 20), lookahead=barmerge.lookahead_off)
+    tf_bbUpper = tf_bbBasis + 2 * tf_bbDev
+    tf_bbLower = tf_bbBasis - 2 * tf_bbDev
+    tf_bbWidth = tf_bbUpper - tf_bbLower
+    
+    tf_atr = request.security(syminfo.tickerid, tf, ta.atr(14), lookahead=barmerge.lookahead_off)
+    tf_volume = request.security(syminfo.tickerid, tf, volume, lookahead=barmerge.lookahead_off)
+    tf_volumeMA5 = request.security(syminfo.tickerid, tf, ta.sma(volume, 5), lookahead=barmerge.lookahead_off)
+    
+    tf_tenkan = request.security(syminfo.tickerid, tf, ta.sma(hl2, 9), lookahead=barmerge.lookahead_off)
+    tf_kijun = request.security(syminfo.tickerid, tf, ta.sma(hl2, 26), lookahead=barmerge.lookahead_off)
+    
+    tf_close = request.security(syminfo.tickerid, tf, close, lookahead=barmerge.lookahead_off)
+    tf_high = request.security(syminfo.tickerid, tf, high, lookahead=barmerge.lookahead_off)
+    tf_low = request.security(syminfo.tickerid, tf, low, lookahead=barmerge.lookahead_off)
+    tf_open = request.security(syminfo.tickerid, tf, open, lookahead=barmerge.lookahead_off)
+    
+    [tf_ma5, tf_ma20, tf_ma60, tf_ma120, tf_ma200, tf_rsi, tf_macdLine, tf_signalLine, tf_macdHist, tf_kValue, tf_dValue, tf_diPlus, tf_diMinus, tf_adx, tf_bbBasis, tf_bbDev, tf_bbUpper, tf_bbLower, tf_bbWidth, tf_atr, tf_volume, tf_volumeMA5, tf_tenkan, tf_kijun, tf_close, tf_high, tf_low, tf_open]
+
+// CTF 지표 계산 (현재 타임프레임 - 직접 계산)
+ma5 = ta.sma(close, 5)
+ma20 = ta.sma(close, 20)
+ma60 = ta.sma(close, 60)
+ma120 = ta.sma(close, 120)
+ma200 = ta.sma(close, 200)
+
+rsi = ta.rsi(close, 14)
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+kValue = ta.stoch(close, high, low, 14)
+dValue = ta.sma(kValue, 3)
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+
+bbBasis = ta.sma(close, 20)
+bbDev = ta.stdev(close, 20)
+bbUpper = bbBasis + 2 * bbDev
+bbLower = bbBasis - 2 * bbDev
+bbWidth = bbUpper - bbLower
+
+atr = ta.atr(14)
+volumeMA5 = ta.sma(volume, 5)
+
+tenkan = ta.sma(hl2, 9)
+kijun = ta.sma(hl2, 26)
+
+// HTF1, HTF2, HTF3 지표 계산 (각 지표를 개별적으로 계산)
+htf1_ma5 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 5), lookahead=barmerge.lookahead_off) : na
+htf1_ma20 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf1_ma60 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 60), lookahead=barmerge.lookahead_off) : na
+htf1_ma120 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 120), lookahead=barmerge.lookahead_off) : na
+htf1_ma200 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 200), lookahead=barmerge.lookahead_off) : na
+htf1_rsi = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.rsi(close, 14), lookahead=barmerge.lookahead_off) : na
+htf1_macdLine = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.ema(close, 12) - ta.ema(close, 26), lookahead=barmerge.lookahead_off) : na
+htf1_signalLine = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.ema(ta.ema(close, 12) - ta.ema(close, 26), 9), lookahead=barmerge.lookahead_off) : na
+htf1_macdHist = htf1_macdLine - htf1_signalLine
+htf1_kValue = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.stoch(close, high, low, 14), lookahead=barmerge.lookahead_off) : na
+htf1_dValue = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(ta.stoch(close, high, low, 14), 3), lookahead=barmerge.lookahead_off) : na
+// DMI 각 요소를 직접 계산
+htf1_smoothedTR = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.rma(ta.tr, 14), lookahead=barmerge.lookahead_off) : na
+htf1_smoothedPlusDM = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.rma((high - high[1]) > (low[1] - low) and (high - high[1]) > 0 ? (high - high[1]) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf1_smoothedMinusDM = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.rma((low[1] - low) > (high - high[1]) and (low[1] - low) > 0 ? (low[1] - low) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf1_diPlus = htf1_smoothedTR != 0 and not na(htf1_smoothedTR) ? (htf1_smoothedPlusDM / htf1_smoothedTR) * 100 : 0.0
+htf1_diMinus = htf1_smoothedTR != 0 and not na(htf1_smoothedTR) ? (htf1_smoothedMinusDM / htf1_smoothedTR) * 100 : 0.0
+htf1_dxSum = htf1_diPlus + htf1_diMinus
+htf1_dxValue = htf1_dxSum != 0 ? math.abs(htf1_diPlus - htf1_diMinus) / htf1_dxSum * 100 : 0.0
+htf1_adx = ta.rma(htf1_dxValue, 14)
+htf1_bbBasis = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf1_bbDev = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.stdev(close, 20), lookahead=barmerge.lookahead_off) : na
+htf1_bbUpper = htf1_bbBasis + 2 * htf1_bbDev
+htf1_bbLower = htf1_bbBasis - 2 * htf1_bbDev
+htf1_bbWidth = htf1_bbUpper - htf1_bbLower
+htf1_atr = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.atr(14), lookahead=barmerge.lookahead_off) : na
+htf1_volume = htf1String != "" ? request.security(syminfo.tickerid, htf1String, volume, lookahead=barmerge.lookahead_off) : na
+htf1_volumeMA5 = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(volume, 5), lookahead=barmerge.lookahead_off) : na
+htf1_tenkan = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(hl2, 9), lookahead=barmerge.lookahead_off) : na
+htf1_kijun = htf1String != "" ? request.security(syminfo.tickerid, htf1String, ta.sma(hl2, 26), lookahead=barmerge.lookahead_off) : na
+htf1_close = htf1String != "" ? request.security(syminfo.tickerid, htf1String, close, lookahead=barmerge.lookahead_off) : na
+htf1_high = htf1String != "" ? request.security(syminfo.tickerid, htf1String, high, lookahead=barmerge.lookahead_off) : na
+htf1_low = htf1String != "" ? request.security(syminfo.tickerid, htf1String, low, lookahead=barmerge.lookahead_off) : na
+htf1_open = htf1String != "" ? request.security(syminfo.tickerid, htf1String, open, lookahead=barmerge.lookahead_off) : na
+
+htf2_ma5 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 5), lookahead=barmerge.lookahead_off) : na
+htf2_ma20 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf2_ma60 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 60), lookahead=barmerge.lookahead_off) : na
+htf2_ma120 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 120), lookahead=barmerge.lookahead_off) : na
+htf2_ma200 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 200), lookahead=barmerge.lookahead_off) : na
+htf2_rsi = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.rsi(close, 14), lookahead=barmerge.lookahead_off) : na
+htf2_macdLine = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.ema(close, 12) - ta.ema(close, 26), lookahead=barmerge.lookahead_off) : na
+htf2_signalLine = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.ema(ta.ema(close, 12) - ta.ema(close, 26), 9), lookahead=barmerge.lookahead_off) : na
+htf2_macdHist = htf2_macdLine - htf2_signalLine
+htf2_kValue = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.stoch(close, high, low, 14), lookahead=barmerge.lookahead_off) : na
+htf2_dValue = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(ta.stoch(close, high, low, 14), 3), lookahead=barmerge.lookahead_off) : na
+// DMI 각 요소를 직접 계산
+htf2_smoothedTR = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.rma(ta.tr, 14), lookahead=barmerge.lookahead_off) : na
+htf2_smoothedPlusDM = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.rma((high - high[1]) > (low[1] - low) and (high - high[1]) > 0 ? (high - high[1]) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf2_smoothedMinusDM = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.rma((low[1] - low) > (high - high[1]) and (low[1] - low) > 0 ? (low[1] - low) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf2_diPlus = htf2_smoothedTR != 0 and not na(htf2_smoothedTR) ? (htf2_smoothedPlusDM / htf2_smoothedTR) * 100 : 0.0
+htf2_diMinus = htf2_smoothedTR != 0 and not na(htf2_smoothedTR) ? (htf2_smoothedMinusDM / htf2_smoothedTR) * 100 : 0.0
+htf2_dxSum = htf2_diPlus + htf2_diMinus
+htf2_dxValue = htf2_dxSum != 0 ? math.abs(htf2_diPlus - htf2_diMinus) / htf2_dxSum * 100 : 0.0
+htf2_adx = ta.rma(htf2_dxValue, 14)
+htf2_bbBasis = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf2_bbDev = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.stdev(close, 20), lookahead=barmerge.lookahead_off) : na
+htf2_bbUpper = htf2_bbBasis + 2 * htf2_bbDev
+htf2_bbLower = htf2_bbBasis - 2 * htf2_bbDev
+htf2_bbWidth = htf2_bbUpper - htf2_bbLower
+htf2_atr = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.atr(14), lookahead=barmerge.lookahead_off) : na
+htf2_volume = htf2String != "" ? request.security(syminfo.tickerid, htf2String, volume, lookahead=barmerge.lookahead_off) : na
+htf2_volumeMA5 = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(volume, 5), lookahead=barmerge.lookahead_off) : na
+htf2_tenkan = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(hl2, 9), lookahead=barmerge.lookahead_off) : na
+htf2_kijun = htf2String != "" ? request.security(syminfo.tickerid, htf2String, ta.sma(hl2, 26), lookahead=barmerge.lookahead_off) : na
+htf2_close = htf2String != "" ? request.security(syminfo.tickerid, htf2String, close, lookahead=barmerge.lookahead_off) : na
+htf2_high = htf2String != "" ? request.security(syminfo.tickerid, htf2String, high, lookahead=barmerge.lookahead_off) : na
+htf2_low = htf2String != "" ? request.security(syminfo.tickerid, htf2String, low, lookahead=barmerge.lookahead_off) : na
+htf2_open = htf2String != "" ? request.security(syminfo.tickerid, htf2String, open, lookahead=barmerge.lookahead_off) : na
+
+htf3_ma5 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 5), lookahead=barmerge.lookahead_off) : na
+htf3_ma20 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf3_ma60 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 60), lookahead=barmerge.lookahead_off) : na
+htf3_ma120 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 120), lookahead=barmerge.lookahead_off) : na
+htf3_ma200 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 200), lookahead=barmerge.lookahead_off) : na
+htf3_rsi = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.rsi(close, 14), lookahead=barmerge.lookahead_off) : na
+htf3_macdLine = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.ema(close, 12) - ta.ema(close, 26), lookahead=barmerge.lookahead_off) : na
+htf3_signalLine = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.ema(ta.ema(close, 12) - ta.ema(close, 26), 9), lookahead=barmerge.lookahead_off) : na
+htf3_macdHist = htf3_macdLine - htf3_signalLine
+htf3_kValue = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.stoch(close, high, low, 14), lookahead=barmerge.lookahead_off) : na
+htf3_dValue = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(ta.stoch(close, high, low, 14), 3), lookahead=barmerge.lookahead_off) : na
+// DMI 각 요소를 직접 계산
+htf3_smoothedTR = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.rma(ta.tr, 14), lookahead=barmerge.lookahead_off) : na
+htf3_smoothedPlusDM = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.rma((high - high[1]) > (low[1] - low) and (high - high[1]) > 0 ? (high - high[1]) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf3_smoothedMinusDM = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.rma((low[1] - low) > (high - high[1]) and (low[1] - low) > 0 ? (low[1] - low) : 0.0, 14), lookahead=barmerge.lookahead_off) : na
+htf3_diPlus = htf3_smoothedTR != 0 and not na(htf3_smoothedTR) ? (htf3_smoothedPlusDM / htf3_smoothedTR) * 100 : 0.0
+htf3_diMinus = htf3_smoothedTR != 0 and not na(htf3_smoothedTR) ? (htf3_smoothedMinusDM / htf3_smoothedTR) * 100 : 0.0
+htf3_dxSum = htf3_diPlus + htf3_diMinus
+htf3_dxValue = htf3_dxSum != 0 ? math.abs(htf3_diPlus - htf3_diMinus) / htf3_dxSum * 100 : 0.0
+htf3_adx = ta.rma(htf3_dxValue, 14)
+htf3_bbBasis = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htf3_bbDev = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.stdev(close, 20), lookahead=barmerge.lookahead_off) : na
+htf3_bbUpper = htf3_bbBasis + 2 * htf3_bbDev
+htf3_bbLower = htf3_bbBasis - 2 * htf3_bbDev
+htf3_bbWidth = htf3_bbUpper - htf3_bbLower
+htf3_atr = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.atr(14), lookahead=barmerge.lookahead_off) : na
+htf3_volume = htf3String != "" ? request.security(syminfo.tickerid, htf3String, volume, lookahead=barmerge.lookahead_off) : na
+htf3_volumeMA5 = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(volume, 5), lookahead=barmerge.lookahead_off) : na
+htf3_tenkan = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(hl2, 9), lookahead=barmerge.lookahead_off) : na
+htf3_kijun = htf3String != "" ? request.security(syminfo.tickerid, htf3String, ta.sma(hl2, 26), lookahead=barmerge.lookahead_off) : na
+htf3_close = htf3String != "" ? request.security(syminfo.tickerid, htf3String, close, lookahead=barmerge.lookahead_off) : na
+htf3_high = htf3String != "" ? request.security(syminfo.tickerid, htf3String, high, lookahead=barmerge.lookahead_off) : na
+htf3_low = htf3String != "" ? request.security(syminfo.tickerid, htf3String, low, lookahead=barmerge.lookahead_off) : na
+htf3_open = htf3String != "" ? request.security(syminfo.tickerid, htf3String, open, lookahead=barmerge.lookahead_off) : na
+
+// ═════════════════════════════════════════════════════════════
+// MTF 추세 판단 함수
+// ═════════════════════════════════════════════════════════════
+// IMMUTABLE DATA PATTERN: lookahead=barmerge.lookahead_off로 미래 데이터 방지
+// HTF 타임프레임 선택
+htfTimeframe = htf1String != "" ? htf1String : htf2String != "" ? htf2String : htf3String != "" ? htf3String : ""
+
+// HTF 지표 계산 (매 바마다 계산)
+htfClose = htfTimeframe != "" ? request.security(syminfo.tickerid, htfTimeframe, close, lookahead=barmerge.lookahead_off) : na
+htfMA20 = htfTimeframe != "" ? request.security(syminfo.tickerid, htfTimeframe, ta.sma(close, 20), lookahead=barmerge.lookahead_off) : na
+htfMA60 = htfTimeframe != "" ? request.security(syminfo.tickerid, htfTimeframe, ta.sma(close, 60), lookahead=barmerge.lookahead_off) : na
+
+// MTF 추세 판단
+getMTFTrend() =>
+    if not useMTF or mtfTrendWeight == 0
+        0
+    else
+        if htfTimeframe == "" or na(htfClose) or na(htfMA20) or na(htfMA60)
+            0
+        else
+            uptrend = htfClose > htfMA20 and htfMA20 > htfMA60
+            downtrend = htfClose < htfMA20 and htfMA20 < htfMA60
+            
+            if uptrend
+                mtfTrendWeight
+            else if downtrend
+                -mtfTrendWeight
+            else
+                0
+
+mtfTrend = getMTFTrend()
+mtfBullish = mtfTrend > 0
+mtfBearish = mtfTrend < 0
+
+// ═════════════════════════════════════════════════════════════
+// CTF 크로스오버 및 최저/최고값 계산 (매 바마다 계산)
+// ═════════════════════════════════════════════════════════════
+macdCross = ta.crossover(macdLine, signalLine)
+ma5_20_Cross = ta.crossover(ma5, ma20)
+bbWidthMin = ta.lowest(bbWidth, 20)
+macdCrossZero = ta.crossover(macdLine, 0)
+rsiCross50 = ta.crossover(rsi, 50)
+kValue_dValue_Cross = ta.crossover(kValue, dValue)
+tenkan_kijun_Cross = ta.crossover(tenkan, kijun)
+highPoint50 = ta.highest(high, 50)
+lowPoint50 = ta.lowest(low, 50)
+boxHigh20 = ta.highest(high, 20)
+boxLow20 = ta.lowest(low, 20)
+
+macdCrossunder = ta.crossunder(macdLine, signalLine)
+ma5_20_Crossunder = ta.crossunder(ma5, ma20)
+macdHistCrossunder = ta.crossunder(macdHist, 0)
+macdCrossunderZero = ta.crossunder(macdLine, 0)
+rsiCrossunder50 = ta.crossunder(rsi, 50)
+kValue_dValue_Crossunder = ta.crossunder(kValue, dValue)
+tenkan_kijun_Crossunder = ta.crossunder(tenkan, kijun)
+
+// ═════════════════════════════════════════════════════════════
+// 매수 타점 전략 함수들 (Buy Entry Strategies)
+// ═════════════════════════════════════════════════════════════
+
+// B01: RSI + BB + MACD (유튜브 인기 전략)
+b01_check() =>
+    c1 = rsi < 30
+    c2 = close <= bbLower
+    c3 = macdCross
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B02: 골든크로스 + 거래량 + RSI + MTF
+b02_check() =>
+    c1 = ma5_20_Cross
+    c2 = volume > volumeMA5 * 1.5
+    c3 = rsi > 50
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B03: BB수축 + 돌파 + 거래량 + MTF
+b03_check() =>
+    c1 = bbWidth == bbWidthMin
+    c2 = close > bbUpper
+    c3 = volume > volumeMA5 * 2
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B04: 다중 MA 지지 + RSI + MTF
+b04_check() =>
+    c1 = ma5 > ma20 and ma20 > ma60
+    c2 = low < ma20 and close > ma20
+    c3 = rsi >= 50
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B05: MACD 0선 + RSI + 거래량 + MTF
+b05_check() =>
+    c1 = macdCrossZero
+    c2 = rsiCross50
+    c3 = volume > volumeMA5 * 1.5
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B06: Stoch GC + RSI + BB + MTF
+b06_check() =>
+    c1 = kValue_dValue_Cross and kValue < 20
+    c2 = rsi < 40
+    c3 = close < bbBasis
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B07: 추세선 돌파 + RSI + MA + MTF
+b07_check() =>
+    c1 = close > ma60 and close[1] < ma60
+    c2 = rsiCross50
+    c3 = volume > volumeMA5 * 1.3
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B08: ADX 강도 + DI + MA정배열 + MTF
+b08_check() =>
+    c1 = adx >= 25
+    c2 = diPlus > diMinus
+    c3 = ma5 > ma20 and ma20 > ma60
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B09: 일목 전환선 GC + 구름대 + MTF
+b09_check() =>
+    senkouA = (tenkan + kijun) / 2
+    senkouB = ta.sma(hl2, 52)
+    cloudTop = math.max(senkouA[26], senkouB[26])
+    c1 = tenkan_kijun_Cross
+    c2 = close > cloudTop
+    c3 = volume > volumeMA5 * 1.2
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B10: 피보나치 지지 + MA + RSI + MTF
+b10_check() =>
+    fib618 = highPoint50 - (highPoint50 - lowPoint50) * 0.618
+    c1 = math.abs(close - fib618) < atr * 0.5
+    c2 = close > ma60
+    c3 = rsi < 45 and rsi > 30
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B11: 7중 골든크로스 (MTF 포함)
+b11_check() =>
+    c1 = ma5_20_Cross
+    c2 = rsi > 30 and rsi[1] <= 30
+    c3 = volume > volumeMA5 * 1.7
+    c4 = adx > 25
+    c5 = close > ma200
+    c6 = kValue_dValue_Cross and kValue < 20
+    c7 = mtfBullish or not useMTF
+    [c1, c2, c3, c4, c5, c6, c7]
+
+// B12: 6중 MA 눌림목 (MTF 포함)
+b12_check() =>
+    c1 = ma5 > ma20 and ma20 > ma60
+    c2 = low < ma20 and close > ma20
+    c3 = ma60 > ma60[1]
+    c4 = rsi >= 50
+    c5 = adx >= 20
+    c6 = mtfBullish or not useMTF
+    [c1, c2, c3, c4, c5, c6, false]
+
+// B13: 상승 다이버전스 (MTF 포함)
+b13_check() =>
+    c1 = low < low[5]
+    c2 = rsi > rsi[5]
+    c3 = kValue_dValue_Cross
+    c4 = volume > volume[1]
+    c5 = adx < 20
+    c6 = mtfBullish or not useMTF
+    [c1, c2, c3, c4, c5, c6, false]
+
+// B14: 박스권 돌파 + 거래량 + MTF
+b14_check() =>
+    c1 = close > boxHigh20[5] and close[1] < boxHigh20[5]
+    c2 = volume > volumeMA5 * 2
+    c3 = macdCrossZero
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// B15: RSI 과매도 + BB하단 + 거래량 + MTF
+b15_check() =>
+    c1 = rsi < 30
+    c2 = close < bbLower
+    c3 = volume > volumeMA5
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// ═════════════════════════════════════════════════════════════
+// 매도 타점 전략 함수들 (Sell Exit Strategies)
+// ═════════════════════════════════════════════════════════════
+
+// S01: RSI + BB + MACD (유튜브 인기 전략)
+s01_check() =>
+    c1 = rsi > 70
+    c2 = close >= bbUpper
+    c3 = macdCrossunder
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S02: 데드크로스 + 거래량 + RSI + MTF
+s02_check() =>
+    c1 = ma5_20_Crossunder
+    c2 = volume > volumeMA5 * 1.5
+    c3 = rsi < 50
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S03: BB이탈 + 재진입 + MACD + MTF
+s03_check() =>
+    c1 = high[1] > bbUpper and close < bbUpper
+    c2 = close < open
+    c3 = macdHistCrossunder
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S04: 다중 MA 저항 + RSI + MTF
+s04_check() =>
+    c1 = ma60 > ma20 and ma20 > ma5
+    c2 = high > ma20 and close < ma20
+    c3 = rsi <= 50
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S05: MACD 0선 하향 + RSI + 거래량 + MTF
+s05_check() =>
+    c1 = macdCrossunderZero
+    c2 = rsiCrossunder50
+    c3 = volume > volumeMA5 * 1.5
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S06: Stoch DC + RSI + BB + MTF
+s06_check() =>
+    c1 = kValue_dValue_Crossunder and kValue > 80
+    c2 = rsi > 60
+    c3 = close > bbBasis
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S07: 추세선 이탈 + RSI + MA + MTF
+s07_check() =>
+    c1 = close < ma60 and close[1] > ma60
+    c2 = rsiCrossunder50
+    c3 = volume > volumeMA5 * 1.3
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S08: ADX 강도 + DI + MA역배열 + MTF
+s08_check() =>
+    c1 = adx >= 25
+    c2 = diMinus > diPlus
+    c3 = ma60 > ma20 and ma20 > ma5
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S09: 일목 전환선 DC + 구름대 + MTF
+s09_check() =>
+    senkouA = (tenkan + kijun) / 2
+    senkouB = ta.sma(hl2, 52)
+    cloudBottom = math.min(senkouA[26], senkouB[26])
+    c1 = tenkan_kijun_Crossunder
+    c2 = close < cloudBottom
+    c3 = volume > volumeMA5 * 1.2
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S10: 피보나치 저항 + MA + RSI + MTF
+s10_check() =>
+    fib1618 = lowPoint50 + (highPoint50 - lowPoint50) * 1.618
+    c1 = math.abs(close - fib1618) < atr * 0.5
+    c2 = close < ma120
+    c3 = rsi > 55 and rsi < 70
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S11: 7중 데드크로스 (MTF 포함)
+s11_check() =>
+    c1 = ma5_20_Crossunder
+    c2 = rsi < 70 and rsi[1] >= 70
+    c3 = volume > volumeMA5 * 1.7
+    c4 = adx > 25
+    c5 = close < ma200
+    c6 = kValue_dValue_Crossunder and kValue > 80
+    c7 = mtfBearish or not useMTF
+    [c1, c2, c3, c4, c5, c6, c7]
+
+// S12: 6중 MA 되돌림 (MTF 포함)
+s12_check() =>
+    c1 = ma60 > ma20 and ma20 > ma5
+    c2 = high > ma20 and close < ma20
+    c3 = ma60 < ma60[1]
+    c4 = rsi <= 50
+    c5 = adx >= 20
+    c6 = mtfBearish or not useMTF
+    [c1, c2, c3, c4, c5, c6, false]
+
+// S13: 하락 다이버전스 (MTF 포함)
+s13_check() =>
+    c1 = high > high[5]
+    c2 = rsi < rsi[5]
+    c3 = kValue_dValue_Crossunder
+    c4 = volume < volume[1]
+    c5 = adx < 20
+    c6 = mtfBearish or not useMTF
+    [c1, c2, c3, c4, c5, c6, false]
+
+// S14: 박스권 이탈 + 거래량 + MTF
+s14_check() =>
+    c1 = close < boxLow20[5] and close[1] > boxLow20[5]
+    c2 = volume > volumeMA5 * 2
+    c3 = macdCrossunderZero
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// S15: RSI 과매수 + BB상단 + 거래량 + MTF
+s15_check() =>
+    c1 = rsi > 70
+    c2 = close > bbUpper
+    c3 = volume > volumeMA5
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// ═════════════════════════════════════════════════════════════
+// 조건 카운트 함수
+// ═════════════════════════════════════════════════════════════
+countTrue(c1, c2, c3, c4, c5, c6, c7) =>
+    cnt = 0
+    if c1
+        cnt += 1
+    if c2
+        cnt += 1
+    if c3
+        cnt += 1
+    if c4
+        cnt += 1
+    if c5
+        cnt += 1
+    if c6
+        cnt += 1
+    if c7
+        cnt += 1
+    cnt
+
+// ═════════════════════════════════════════════════════════════
+// 매수 타점 신호 계산
+// ═════════════════════════════════════════════════════════════
+[b01_1, b01_2, b01_3, b01_4, b01_5, b01_6, b01_7] = b01_check()
+b01_cnt = countTrue(b01_1, b01_2, b01_3, b01_4, b01_5, b01_6, b01_7)
+b01_signal = b01_cnt >= minConditions
+
+[b02_1, b02_2, b02_3, b02_4, b02_5, b02_6, b02_7] = b02_check()
+b02_cnt = countTrue(b02_1, b02_2, b02_3, b02_4, b02_5, b02_6, b02_7)
+b02_signal = b02_cnt >= minConditions
+
+[b03_1, b03_2, b03_3, b03_4, b03_5, b03_6, b03_7] = b03_check()
+b03_cnt = countTrue(b03_1, b03_2, b03_3, b03_4, b03_5, b03_6, b03_7)
+b03_signal = b03_cnt >= minConditions
+
+[b04_1, b04_2, b04_3, b04_4, b04_5, b04_6, b04_7] = b04_check()
+b04_cnt = countTrue(b04_1, b04_2, b04_3, b04_4, b04_5, b04_6, b04_7)
+b04_signal = b04_cnt >= minConditions
+
+[b05_1, b05_2, b05_3, b05_4, b05_5, b05_6, b05_7] = b05_check()
+b05_cnt = countTrue(b05_1, b05_2, b05_3, b05_4, b05_5, b05_6, b05_7)
+b05_signal = b05_cnt >= minConditions
+
+[b06_1, b06_2, b06_3, b06_4, b06_5, b06_6, b06_7] = b06_check()
+b06_cnt = countTrue(b06_1, b06_2, b06_3, b06_4, b06_5, b06_6, b06_7)
+b06_signal = b06_cnt >= minConditions
+
+[b07_1, b07_2, b07_3, b07_4, b07_5, b07_6, b07_7] = b07_check()
+b07_cnt = countTrue(b07_1, b07_2, b07_3, b07_4, b07_5, b07_6, b07_7)
+b07_signal = b07_cnt >= minConditions
+
+[b08_1, b08_2, b08_3, b08_4, b08_5, b08_6, b08_7] = b08_check()
+b08_cnt = countTrue(b08_1, b08_2, b08_3, b08_4, b08_5, b08_6, b08_7)
+b08_signal = b08_cnt >= minConditions
+
+[b09_1, b09_2, b09_3, b09_4, b09_5, b09_6, b09_7] = b09_check()
+b09_cnt = countTrue(b09_1, b09_2, b09_3, b09_4, b09_5, b09_6, b09_7)
+b09_signal = b09_cnt >= minConditions
+
+[b10_1, b10_2, b10_3, b10_4, b10_5, b10_6, b10_7] = b10_check()
+b10_cnt = countTrue(b10_1, b10_2, b10_3, b10_4, b10_5, b10_6, b10_7)
+b10_signal = b10_cnt >= minConditions
+
+[b11_1, b11_2, b11_3, b11_4, b11_5, b11_6, b11_7] = b11_check()
+b11_cnt = countTrue(b11_1, b11_2, b11_3, b11_4, b11_5, b11_6, b11_7)
+b11_signal = b11_cnt >= minConditions
+
+[b12_1, b12_2, b12_3, b12_4, b12_5, b12_6, b12_7] = b12_check()
+b12_cnt = countTrue(b12_1, b12_2, b12_3, b12_4, b12_5, b12_6, b12_7)
+b12_signal = b12_cnt >= minConditions
+
+[b13_1, b13_2, b13_3, b13_4, b13_5, b13_6, b13_7] = b13_check()
+b13_cnt = countTrue(b13_1, b13_2, b13_3, b13_4, b13_5, b13_6, b13_7)
+b13_signal = b13_cnt >= minConditions
+
+[b14_1, b14_2, b14_3, b14_4, b14_5, b14_6, b14_7] = b14_check()
+b14_cnt = countTrue(b14_1, b14_2, b14_3, b14_4, b14_5, b14_6, b14_7)
+b14_signal = b14_cnt >= minConditions
+
+[b15_1, b15_2, b15_3, b15_4, b15_5, b15_6, b15_7] = b15_check()
+b15_cnt = countTrue(b15_1, b15_2, b15_3, b15_4, b15_5, b15_6, b15_7)
+b15_signal = b15_cnt >= minConditions
+
+// ═════════════════════════════════════════════════════════════
+// 매도 타점 신호 계산
+// ═════════════════════════════════════════════════════════════
+[s01_1, s01_2, s01_3, s01_4, s01_5, s01_6, s01_7] = s01_check()
+s01_cnt = countTrue(s01_1, s01_2, s01_3, s01_4, s01_5, s01_6, s01_7)
+s01_signal = s01_cnt >= minConditions
+
+[s02_1, s02_2, s02_3, s02_4, s02_5, s02_6, s02_7] = s02_check()
+s02_cnt = countTrue(s02_1, s02_2, s02_3, s02_4, s02_5, s02_6, s02_7)
+s02_signal = s02_cnt >= minConditions
+
+[s03_1, s03_2, s03_3, s03_4, s03_5, s03_6, s03_7] = s03_check()
+s03_cnt = countTrue(s03_1, s03_2, s03_3, s03_4, s03_5, s03_6, s03_7)
+s03_signal = s03_cnt >= minConditions
+
+[s04_1, s04_2, s04_3, s04_4, s04_5, s04_6, s04_7] = s04_check()
+s04_cnt = countTrue(s04_1, s04_2, s04_3, s04_4, s04_5, s04_6, s04_7)
+s04_signal = s04_cnt >= minConditions
+
+[s05_1, s05_2, s05_3, s05_4, s05_5, s05_6, s05_7] = s05_check()
+s05_cnt = countTrue(s05_1, s05_2, s05_3, s05_4, s05_5, s05_6, s05_7)
+s05_signal = s05_cnt >= minConditions
+
+[s06_1, s06_2, s06_3, s06_4, s06_5, s06_6, s06_7] = s06_check()
+s06_cnt = countTrue(s06_1, s06_2, s06_3, s06_4, s06_5, s06_6, s06_7)
+s06_signal = s06_cnt >= minConditions
+
+[s07_1, s07_2, s07_3, s07_4, s07_5, s07_6, s07_7] = s07_check()
+s07_cnt = countTrue(s07_1, s07_2, s07_3, s07_4, s07_5, s07_6, s07_7)
+s07_signal = s07_cnt >= minConditions
+
+[s08_1, s08_2, s08_3, s08_4, s08_5, s08_6, s08_7] = s08_check()
+s08_cnt = countTrue(s08_1, s08_2, s08_3, s08_4, s08_5, s08_6, s08_7)
+s08_signal = s08_cnt >= minConditions
+
+[s09_1, s09_2, s09_3, s09_4, s09_5, s09_6, s09_7] = s09_check()
+s09_cnt = countTrue(s09_1, s09_2, s09_3, s09_4, s09_5, s09_6, s09_7)
+s09_signal = s09_cnt >= minConditions
+
+[s10_1, s10_2, s10_3, s10_4, s10_5, s10_6, s10_7] = s10_check()
+s10_cnt = countTrue(s10_1, s10_2, s10_3, s10_4, s10_5, s10_6, s10_7)
+s10_signal = s10_cnt >= minConditions
+
+[s11_1, s11_2, s11_3, s11_4, s11_5, s11_6, s11_7] = s11_check()
+s11_cnt = countTrue(s11_1, s11_2, s11_3, s11_4, s11_5, s11_6, s11_7)
+s11_signal = s11_cnt >= minConditions
+
+[s12_1, s12_2, s12_3, s12_4, s12_5, s12_6, s12_7] = s12_check()
+s12_cnt = countTrue(s12_1, s12_2, s12_3, s12_4, s12_5, s12_6, s12_7)
+s12_signal = s12_cnt >= minConditions
+
+[s13_1, s13_2, s13_3, s13_4, s13_5, s13_6, s13_7] = s13_check()
+s13_cnt = countTrue(s13_1, s13_2, s13_3, s13_4, s13_5, s13_6, s13_7)
+s13_signal = s13_cnt >= minConditions
+
+[s14_1, s14_2, s14_3, s14_4, s14_5, s14_6, s14_7] = s14_check()
+s14_cnt = countTrue(s14_1, s14_2, s14_3, s14_4, s14_5, s14_6, s14_7)
+s14_signal = s14_cnt >= minConditions
+
+[s15_1, s15_2, s15_3, s15_4, s15_5, s15_6, s15_7] = s15_check()
+s15_cnt = countTrue(s15_1, s15_2, s15_3, s15_4, s15_5, s15_6, s15_7)
+s15_signal = s15_cnt >= minConditions
+
+// ═════════════════════════════════════════════════════════════
+// R1_ACCURACY & R2_LABEL PATTERNS
+// ═════════════════════════════════════════════════════════════
+
+// LOCK-IN PATTERN: 최신 레이블 관리
+var label lastBuyLabel = na
+var label lastSellLabel = na
+var line lastBuyLine = na
+var line lastSellLine = na
+
+// DEBOUNCE PATTERN: 마지막 신호 바 추적
+var int last_buy_bar = -999
+var int last_sell_bar = -999
+int min_bars_between_signals = 1  // 최소 간격 (같은 바에서 중복 방지)
+
+// ARRAY-BASED INDEXING: 신호 히스토리 관리
+var array<int> signalBars = array.new<int>()
+var array<string> signalTypes = array.new<string>()
+
+// 확정된 바에서만 히스토리 업데이트
+if barstate.isconfirmed
+    if array.size(signalBars) > 100
+        array.shift(signalBars)
+        array.shift(signalTypes)
+
+// ═════════════════════════════════════════════════════════════
+// HTF1, HTF2, HTF3 신호 생성 (각 타임프레임별로 동일한 전략 적용)
+// ═════════════════════════════════════════════════════════════
+// HTF1 신호 생성 함수 (HTF1 지표 사용)
+// HTF1 크로스오버 및 최저값 계산 (매 바마다 계산)
+htf1_macdCross_temp = ta.crossover(htf1_macdLine, htf1_signalLine)
+htf1_macdCross = not na(htf1_macdLine) and not na(htf1_signalLine) ? htf1_macdCross_temp : false
+htf1_maCross_temp = ta.crossover(htf1_ma5, htf1_ma20)
+htf1_maCross = not na(htf1_ma5) and not na(htf1_ma20) ? htf1_maCross_temp : false
+htf1_bbWidthMin_temp = ta.lowest(htf1_bbWidth, 20)
+htf1_bbWidthMin = not na(htf1_bbWidth) ? htf1_bbWidthMin_temp : na
+htf1_macdCrossZero_temp = ta.crossover(htf1_macdLine, 0)
+htf1_macdCrossZero = not na(htf1_macdLine) ? htf1_macdCrossZero_temp : false
+htf1_rsiCross50_temp = ta.crossover(htf1_rsi, 50)
+htf1_rsiCross50 = not na(htf1_rsi) ? htf1_rsiCross50_temp : false
+
+htf1_b01_check() =>
+    c1 = not na(htf1_rsi) and htf1_rsi < 30
+    c2 = not na(htf1_bbLower) and htf1_close <= htf1_bbLower
+    c3 = htf1_macdCross
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+htf1_b02_check() =>
+    c1 = htf1_maCross
+    c2 = not na(htf1_volume) and not na(htf1_volumeMA5) and htf1_volume > htf1_volumeMA5 * 1.5
+    c3 = not na(htf1_rsi) and htf1_rsi > 50
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+htf1_b03_check() =>
+    c1 = not na(htf1_bbWidth) and not na(htf1_bbWidthMin) and htf1_bbWidth == htf1_bbWidthMin
+    c2 = not na(htf1_bbUpper) and htf1_close > htf1_bbUpper
+    c3 = not na(htf1_volume) and not na(htf1_volumeMA5) and htf1_volume > htf1_volumeMA5 * 2
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+htf1_b04_check() =>
+    c1 = not na(htf1_ma5) and not na(htf1_ma20) and not na(htf1_ma60) and htf1_ma5 > htf1_ma20 and htf1_ma20 > htf1_ma60
+    c2 = not na(htf1_ma20) and htf1_low < htf1_ma20 and htf1_close > htf1_ma20
+    c3 = not na(htf1_rsi) and htf1_rsi >= 50
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+htf1_b05_check() =>
+    c1 = htf1_macdCrossZero
+    c2 = htf1_rsiCross50
+    c3 = not na(htf1_volume) and not na(htf1_volumeMA5) and htf1_volume > htf1_volumeMA5 * 1.5
+    c4 = not useMTF or mtfBullish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// HTF1 매수 신호 계산 (변수 먼저 선언)
+bool htf1_b01_1 = false
+bool htf1_b01_2 = false
+bool htf1_b01_3 = false
+bool htf1_b01_4 = false
+bool htf1_b01_5 = false
+bool htf1_b01_6 = false
+bool htf1_b01_7 = false
+bool htf1_b02_1 = false
+bool htf1_b02_2 = false
+bool htf1_b02_3 = false
+bool htf1_b02_4 = false
+bool htf1_b02_5 = false
+bool htf1_b02_6 = false
+bool htf1_b02_7 = false
+bool htf1_b03_1 = false
+bool htf1_b03_2 = false
+bool htf1_b03_3 = false
+bool htf1_b03_4 = false
+bool htf1_b03_5 = false
+bool htf1_b03_6 = false
+bool htf1_b03_7 = false
+bool htf1_b04_1 = false
+bool htf1_b04_2 = false
+bool htf1_b04_3 = false
+bool htf1_b04_4 = false
+bool htf1_b04_5 = false
+bool htf1_b04_6 = false
+bool htf1_b04_7 = false
+bool htf1_b05_1 = false
+bool htf1_b05_2 = false
+bool htf1_b05_3 = false
+bool htf1_b05_4 = false
+bool htf1_b05_5 = false
+bool htf1_b05_6 = false
+bool htf1_b05_7 = false
+
+if htf1String != ""
+    [htf1_b01_1, htf1_b01_2, htf1_b01_3, htf1_b01_4, htf1_b01_5, htf1_b01_6, htf1_b01_7] = htf1_b01_check()
+    [htf1_b02_1, htf1_b02_2, htf1_b02_3, htf1_b02_4, htf1_b02_5, htf1_b02_6, htf1_b02_7] = htf1_b02_check()
+    [htf1_b03_1, htf1_b03_2, htf1_b03_3, htf1_b03_4, htf1_b03_5, htf1_b03_6, htf1_b03_7] = htf1_b03_check()
+    [htf1_b04_1, htf1_b04_2, htf1_b04_3, htf1_b04_4, htf1_b04_5, htf1_b04_6, htf1_b04_7] = htf1_b04_check()
+    [htf1_b05_1, htf1_b05_2, htf1_b05_3, htf1_b05_4, htf1_b05_5, htf1_b05_6, htf1_b05_7] = htf1_b05_check()
+
+htf1_b01_cnt = countTrue(htf1_b01_1, htf1_b01_2, htf1_b01_3, htf1_b01_4, htf1_b01_5, htf1_b01_6, htf1_b01_7)
+htf1_b01_signal = htf1_b01_cnt >= minConditions
+
+htf1_b02_cnt = countTrue(htf1_b02_1, htf1_b02_2, htf1_b02_3, htf1_b02_4, htf1_b02_5, htf1_b02_6, htf1_b02_7)
+htf1_b02_signal = htf1_b02_cnt >= minConditions
+
+htf1_b03_cnt = countTrue(htf1_b03_1, htf1_b03_2, htf1_b03_3, htf1_b03_4, htf1_b03_5, htf1_b03_6, htf1_b03_7)
+htf1_b03_signal = htf1_b03_cnt >= minConditions
+
+htf1_b04_cnt = countTrue(htf1_b04_1, htf1_b04_2, htf1_b04_3, htf1_b04_4, htf1_b04_5, htf1_b04_6, htf1_b04_7)
+htf1_b04_signal = htf1_b04_cnt >= minConditions
+
+htf1_b05_cnt = countTrue(htf1_b05_1, htf1_b05_2, htf1_b05_3, htf1_b05_4, htf1_b05_5, htf1_b05_6, htf1_b05_7)
+htf1_b05_signal = htf1_b05_cnt >= minConditions
+
+// HTF1 매도 신호 (간단히 몇 개만 추가)
+// HTF1 크로스언더 계산
+htf1_macdCrossunder_temp = ta.crossunder(htf1_macdLine, htf1_signalLine)
+htf1_macdCrossunder = not na(htf1_macdLine) and not na(htf1_signalLine) ? htf1_macdCrossunder_temp : false
+
+htf1_s01_check() =>
+    c1 = not na(htf1_rsi) and htf1_rsi > 70
+    c2 = not na(htf1_bbUpper) and htf1_close >= htf1_bbUpper
+    c3 = htf1_macdCrossunder
+    c4 = not useMTF or mtfBearish or mtfTrend == 0
+    [c1, c2, c3, c4, false, false, false]
+
+// HTF1 매도 신호 변수 선언
+bool htf1_s01_1 = false
+bool htf1_s01_2 = false
+bool htf1_s01_3 = false
+bool htf1_s01_4 = false
+bool htf1_s01_5 = false
+bool htf1_s01_6 = false
+bool htf1_s01_7 = false
+
+if htf1String != ""
+    [htf1_s01_1, htf1_s01_2, htf1_s01_3, htf1_s01_4, htf1_s01_5, htf1_s01_6, htf1_s01_7] = htf1_s01_check()
+
+htf1_s01_cnt = countTrue(htf1_s01_1, htf1_s01_2, htf1_s01_3, htf1_s01_4, htf1_s01_5, htf1_s01_6, htf1_s01_7)
+htf1_s01_signal = htf1_s01_cnt >= minConditions
+
+// ═════════════════════════════════════════════════════════════
+// 통합 신호 및 레이블 (CTF + HTF1 신호 포함)
+// ═════════════════════════════════════════════════════════════
+anyBuySignal = showBuySignals and (
+    (showCTF and (b01_signal or b02_signal or b03_signal or b04_signal or b05_signal or b06_signal or b07_signal or b08_signal or b09_signal or b10_signal or b11_signal or b12_signal or b13_signal or b14_signal or b15_signal)) or
+    (showHTF1 and htf1String != "" and (htf1_b01_signal or htf1_b02_signal or htf1_b03_signal or htf1_b04_signal or htf1_b05_signal))
+)
+
+anySellSignal = showSellSignals and (
+    (showCTF and (s01_signal or s02_signal or s03_signal or s04_signal or s05_signal or s06_signal or s07_signal or s08_signal or s09_signal or s10_signal or s11_signal or s12_signal or s13_signal or s14_signal or s15_signal)) or
+    (showHTF1 and htf1String != "" and htf1_s01_signal)
+)
+
+// 레이블 텍스트 생성 (CTF 우선, 없으면 HTF1)
+buyLabel = b01_signal ? "B01" : b02_signal ? "B02" : b03_signal ? "B03" : b04_signal ? "B04" : b05_signal ? "B05" : b06_signal ? "B06" : b07_signal ? "B07" : b08_signal ? "B08" : b09_signal ? "B09" : b10_signal ? "B10" : b11_signal ? "B11" : b12_signal ? "B12" : b13_signal ? "B13" : b14_signal ? "B14" : b15_signal ? "B15" : htf1_b01_signal ? "HTF1-B01" : htf1_b02_signal ? "HTF1-B02" : htf1_b03_signal ? "HTF1-B03" : htf1_b04_signal ? "HTF1-B04" : htf1_b05_signal ? "HTF1-B05" : ""
+
+sellLabel = s01_signal ? "S01" : s02_signal ? "S02" : s03_signal ? "S03" : s04_signal ? "S04" : s05_signal ? "S05" : s06_signal ? "S06" : s07_signal ? "S07" : s08_signal ? "S08" : s09_signal ? "S09" : s10_signal ? "S10" : s11_signal ? "S11" : s12_signal ? "S12" : s13_signal ? "S13" : s14_signal ? "S14" : s15_signal ? "S15" : htf1_s01_signal ? "HTF1-S01" : ""
+
+// ═════════════════════════════════════════════════════════════
+// 차트에 레이블 표시 - CONFIRMATION PATTERN 및 R1/R2 패턴 적용
+// ═════════════════════════════════════════════════════════════
+// CONFIRMATION PATTERN: 확정된 바에서만 신호 생성
+// DEBOUNCE PATTERN: 연속 신호 방지
+if barstate.isconfirmed and anyBuySignal and (bar_index - last_buy_bar) >= min_bars_between_signals
+    // LOCK-IN PATTERN: 기존 레이블 삭제
+    if not na(lastBuyLabel)
+        label.delete(lastBuyLabel)
+    if not na(lastBuyLine)
+        line.delete(lastBuyLine)
+    
+    // 레이블 생성 (R2_LABEL 패턴: xloc=xloc.bar_index로 캔들에 고정)
+    lastBuyLabel := label.new(bar_index, low, buyLabel, xloc=xloc.bar_index, yloc=yloc.price, color=buyLabelColor, textcolor=color.white, style=label.style_label_up, size=getLabelSize(buyLabelSize))
+    
+    // 캔들과 레이블 연결선 (R2_LABEL 패턴)
+    lastBuyLine := line.new(bar_index, low, bar_index, low - ta.atr(14) * 2, color=color.new(color.white, 0), width=1, xloc=xloc.bar_index)
+    
+    last_buy_bar := bar_index
+    
+    // ARRAY-BASED: 신호 히스토리 저장
+    array.push(signalBars, bar_index)
+    array.push(signalTypes, "BUY_" + buyLabel)
+
+// CONFIRMATION PATTERN: 확정된 바에서만 신호 생성
+// DEBOUNCE PATTERN: 연속 신호 방지
+if barstate.isconfirmed and anySellSignal and (bar_index - last_sell_bar) >= min_bars_between_signals
+    // LOCK-IN PATTERN: 기존 레이블 삭제
+    if not na(lastSellLabel)
+        label.delete(lastSellLabel)
+    if not na(lastSellLine)
+        line.delete(lastSellLine)
+    
+    // 레이블 생성 (R2_LABEL 패턴: xloc=xloc.bar_index로 캔들에 고정)
+    lastSellLabel := label.new(bar_index, high, sellLabel, xloc=xloc.bar_index, yloc=yloc.price, color=sellLabelColor, textcolor=color.white, style=label.style_label_down, size=getLabelSize(sellLabelSize))
+    
+    // 캔들과 레이블 연결선 (R2_LABEL 패턴)
+    lastSellLine := line.new(bar_index, high, bar_index, high + ta.atr(14) * 2, color=color.new(color.white, 0), width=1, xloc=xloc.bar_index)
+    
+    last_sell_bar := bar_index
+    
+    // ARRAY-BASED: 신호 히스토리 저장
+    array.push(signalBars, bar_index)
+    array.push(signalTypes, "SELL_" + sellLabel)
+
+// ═════════════════════════════════════════════════════════════
+// 이동평균선 표시 (계산용으로만 사용, 표시하지 않음)
+// ═════════════════════════════════════════════════════════════
+// plot(ma5, title="MA5", color=color.new(color.blue, 0), linewidth=1)
+// plot(ma20, title="MA20", color=color.new(color.orange, 0), linewidth=2)
+// plot(ma60, title="MA60", color=color.new(color.purple, 0), linewidth=1)
+// plot(ma200, title="MA200", color=color.new(color.gray, 0), linewidth=2)
+
+// ═════════════════════════════════════════════════════════════
+// 볼린저 밴드 표시
+// ═════════════════════════════════════════════════════════════
+p1 = plot(bbUpper, title="BB Upper", color=color.new(color.blue, 70))
+p2 = plot(bbLower, title="BB Lower", color=color.new(color.blue, 70))
+fill(p1, p2, color=color.new(color.blue, 90))
+
+// ═════════════════════════════════════════════════════════════
+// MTF 추세 표시 (배경색)
+// ═════════════════════════════════════════════════════════════
+bgcolor(useMTF and mtfBullish ? color.new(color.green, 95) : useMTF and mtfBearish ? color.new(color.red, 95) : na, title="MTF 추세")
+
+// ═════════════════════════════════════════════════════════════
+// 알림 조건
+// ═════════════════════════════════════════════════════════════
+alertcondition(anyBuySignal, title="매수 타점", message="매수 타점 발생!")
+alertcondition(anySellSignal, title="매도 타점", message="매도 타점 발생!")
